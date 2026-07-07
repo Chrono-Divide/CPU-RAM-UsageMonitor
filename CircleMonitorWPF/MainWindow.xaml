@@ -4,8 +4,8 @@
         xmlns:tb="http://www.hardcodet.net/taskbar"
         Title="CircleMonitor"
         WindowStyle="None"
-        AllowsTransparency="True"
-        Background="Transparent"
+        AllowsTransparency="False"
+        Background="Black"
         Width="150" Height="150"
         ShowInTaskbar="False"
         ResizeMode="NoResize"
@@ -25,11 +25,6 @@
     </Window.ContextMenu>
 
     <Grid x:Name="MainGrid">
-        <!-- Clip to a circle: center(75,75), radius=75 -->
-        <Grid.Clip>
-            <EllipseGeometry Center="75,75" RadiusX="75" RadiusY="75"/>
-        </Grid.Clip>
-
         <!-- Black background circle (150 x 150) -->
         <Ellipse Width="150" Height="150" Fill="Black"/>
 

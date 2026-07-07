@@ -1,28 +1,30 @@
-﻿using Hardcodet.Wpf.TaskbarNotification;
+using Hardcodet.Wpf.TaskbarNotification;
 using System;
 using System.Diagnostics;
-using System.Management;   // For ManagementObjectSearcher if .NET 5+ 
-using System.Runtime.InteropServices; // For DllImport
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Shapes;
 using System.Windows.Threading;
 
 namespace CircleMonitorWPF
 {
     public partial class MainWindow : Window
     {
-        // CPU & RAM usage
-        private PerformanceCounter _cpuCounter;
-        private PerformanceCounter _memAvailableCounter;
-        private float _totalRamMB;
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+        private const double MinimumOpacity = 0.3;
+        private const double MaximumOpacity = 1.0;
+        private const double ArcFullCircleAngle = 359.99;
+
         private DispatcherTimer _timer;
-
-        // Tray icon object
         private TaskbarIcon _taskbarIcon;
+        private bool _isInitialPlacementDone;
+        private bool _hasPreviousCpuTimes;
+        private ulong _previousIdleTime;
+        private ulong _previousKernelTime;
+        private ulong _previousUserTime;
 
-        // Win32 API for monitor detection
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out POINT lpPoint);
 
@@ -32,7 +34,22 @@ namespace CircleMonitorWPF
         [DllImport("user32.dll")]
         private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
-        private const uint MONITOR_DEFAULTTONEAREST = 2;
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr CreateEllipticRgn(int nLeftRect, int nTopRect, int nRightRect, int nBottomRect);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSystemTimes(out FILETIME lpIdleTime, out FILETIME lpKernelTime, out FILETIME lpUserTime);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT
@@ -59,105 +76,289 @@ namespace CircleMonitorWPF
             public uint dwFlags;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILETIME
+        {
+            public uint dwLowDateTime;
+            public uint dwHighDateTime;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MEMORYSTATUSEX
+        {
+            public uint dwLength;
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys;
+            public ulong ullAvailPhys;
+            public ulong ullTotalPageFile;
+            public ulong ullAvailPageFile;
+            public ulong ullTotalVirtual;
+            public ulong ullAvailVirtual;
+            public ulong ullAvailExtendedVirtual;
+        }
+
+        private struct MemorySnapshot
+        {
+            public float UsedRamMB;
+            public float TotalRamMB;
+            public float UsedRamGB;
+            public float UsagePercent;
+        }
+
         public MainWindow()
         {
             InitializeComponent();
 
-            // Initialize PerformanceCounters
-            _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
-            _memAvailableCounter = new PerformanceCounter("Memory", "Available MBytes");
-
-            // Get total RAM in MB
-            try
-            {
-                var searcher = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem");
-                foreach (ManagementObject obj in searcher.Get())
-                {
-                    double totalBytes = Convert.ToDouble(obj["TotalPhysicalMemory"]);
-                    _totalRamMB = (float)(totalBytes / 1024 / 1024);
-                }
-            }
-            catch
-            {
-                _totalRamMB = 8192f; // fallback: 8GB
-            }
-
-            // Timer to update CPU/RAM every second
-            _timer = new DispatcherTimer();
+            _timer = new DispatcherTimer(DispatcherPriority.Background);
             _timer.Interval = TimeSpan.FromSeconds(1);
             _timer.Tick += Timer_Tick;
-            _timer.Start();
+
+            IsVisibleChanged += Window_IsVisibleChanged;
+        }
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            ApplyCircularWindowRegion();
         }
 
         private void Timer_Tick(object sender, EventArgs e)
         {
+            if (!IsVisible)
+            {
+                StopMonitoring();
+                return;
+            }
+
             UpdateUsage();
+        }
+
+        private void StartMonitoring()
+        {
+            if (_timer == null || _timer.IsEnabled)
+            {
+                return;
+            }
+
+            _hasPreviousCpuTimes = false;
+            UpdateUsage();
+            _timer.Start();
+        }
+
+        private void StopMonitoring()
+        {
+            if (_timer != null && _timer.IsEnabled)
+            {
+                _timer.Stop();
+            }
+
+            _hasPreviousCpuTimes = false;
         }
 
         private void UpdateUsage()
         {
-            // CPU usage
-            float cpuUsage = 0f;
-            try { cpuUsage = _cpuCounter.NextValue(); } catch { }
-
-            // Memory usage
-            float memAvailable = 0f;
-            try { memAvailable = _memAvailableCounter.NextValue(); } catch { }
-
-            float usedRamMB = _totalRamMB - memAvailable;
-            float usedRamGB = usedRamMB / 1024f;
-
-            float ramUsagePercent = 0f;
-            if (_totalRamMB > 0)
+            float cpuUsage;
+            if (TryGetCpuUsage(out cpuUsage))
             {
-                ramUsagePercent = (usedRamMB / _totalRamMB) * 100f;
+                CpuTextBlock.Text = string.Format("CPU: {0:0.0}%", cpuUsage);
+                UpdateArcSegment(OuterArcSegment, 75, 75, 70, GetUsageAngle(cpuUsage));
+                OuterArcPath.Stroke = GetUsageBrush(cpuUsage);
+            }
+            else
+            {
+                CpuTextBlock.Text = "CPU: N/A";
+                UpdateArcSegment(OuterArcSegment, 75, 75, 70, 0);
+                OuterArcPath.Stroke = Brushes.Gray;
             }
 
-            // Update text
-            CpuTextBlock.Text = $"CPU: {cpuUsage:0.0}%";
-            RamTextBlock.Text = $"RAM: {usedRamGB:0.0} GB";
-            // Tooltip: detail in MB
-            MainGrid.ToolTip = $"RAM usage: {usedRamMB:0.0} MB / {_totalRamMB:0.0} MB";
+            MemorySnapshot memory;
+            if (TryGetMemorySnapshot(out memory))
+            {
+                RamTextBlock.Text = string.Format("RAM: {0:0.0} GB", memory.UsedRamGB);
+                MainGrid.ToolTip = string.Format(
+                    "RAM usage: {0:0.0} MB / {1:0.0} MB",
+                    memory.UsedRamMB,
+                    memory.TotalRamMB);
 
-            // Update arcs
-            double cpuAngle = (cpuUsage / 100.0) * 360.0;
-            UpdateArcSegment(OuterArcSegment, 75, 75, 70, cpuAngle);
-            OuterArcPath.Stroke = GetUsageBrush(cpuUsage);
+                UpdateArcSegment(InnerArcSegment, 75, 75, 55, GetUsageAngle(memory.UsagePercent));
+                InnerArcPath.Stroke = GetUsageBrush(memory.UsagePercent);
+            }
+            else
+            {
+                RamTextBlock.Text = "RAM: N/A";
+                MainGrid.ToolTip = "RAM usage unavailable";
+                UpdateArcSegment(InnerArcSegment, 75, 75, 55, 0);
+                InnerArcPath.Stroke = Brushes.Gray;
+            }
+        }
 
-            double ramAngle = (ramUsagePercent / 100.0) * 360.0;
-            UpdateArcSegment(InnerArcSegment, 75, 75, 55, ramAngle);
-            InnerArcPath.Stroke = GetUsageBrush(ramUsagePercent);
+        private bool TryGetCpuUsage(out float cpuUsage)
+        {
+            cpuUsage = 0f;
+
+            FILETIME idleTime;
+            FILETIME kernelTime;
+            FILETIME userTime;
+            if (!GetSystemTimes(out idleTime, out kernelTime, out userTime))
+            {
+                return false;
+            }
+
+            ulong idle = ToUInt64(idleTime);
+            ulong kernel = ToUInt64(kernelTime);
+            ulong user = ToUInt64(userTime);
+
+            if (!_hasPreviousCpuTimes)
+            {
+                SaveCpuTimes(idle, kernel, user);
+                _hasPreviousCpuTimes = true;
+                return true;
+            }
+
+            ulong idleDelta = GetDelta(idle, _previousIdleTime);
+            ulong kernelDelta = GetDelta(kernel, _previousKernelTime);
+            ulong userDelta = GetDelta(user, _previousUserTime);
+            ulong totalDelta = kernelDelta + userDelta;
+
+            SaveCpuTimes(idle, kernel, user);
+
+            if (totalDelta == 0)
+            {
+                return true;
+            }
+
+            double usage = (1.0 - ((double)idleDelta / totalDelta)) * 100.0;
+            cpuUsage = ClampUsage(usage);
+            return true;
+        }
+
+        private bool TryGetMemorySnapshot(out MemorySnapshot snapshot)
+        {
+            snapshot = new MemorySnapshot();
+
+            MEMORYSTATUSEX status = new MEMORYSTATUSEX();
+            status.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+
+            if (!GlobalMemoryStatusEx(ref status) || status.ullTotalPhys == 0)
+            {
+                return false;
+            }
+
+            double totalMB = status.ullTotalPhys / 1024.0 / 1024.0;
+            double availableMB = status.ullAvailPhys / 1024.0 / 1024.0;
+            double usedMB = Math.Max(0.0, totalMB - availableMB);
+
+            snapshot.TotalRamMB = (float)totalMB;
+            snapshot.UsedRamMB = (float)usedMB;
+            snapshot.UsedRamGB = (float)(usedMB / 1024.0);
+            snapshot.UsagePercent = ClampUsage((usedMB / totalMB) * 100.0);
+            return true;
+        }
+
+        private void SaveCpuTimes(ulong idle, ulong kernel, ulong user)
+        {
+            _previousIdleTime = idle;
+            _previousKernelTime = kernel;
+            _previousUserTime = user;
+        }
+
+        private static ulong ToUInt64(FILETIME time)
+        {
+            return ((ulong)time.dwHighDateTime << 32) | time.dwLowDateTime;
+        }
+
+        private static ulong GetDelta(ulong current, ulong previous)
+        {
+            return current >= previous ? current - previous : 0;
+        }
+
+        private static float ClampUsage(double usagePercent)
+        {
+            if (double.IsNaN(usagePercent) || double.IsInfinity(usagePercent))
+            {
+                return 0f;
+            }
+
+            if (usagePercent < 0.0)
+            {
+                return 0f;
+            }
+
+            if (usagePercent > 100.0)
+            {
+                return 100f;
+            }
+
+            return (float)usagePercent;
+        }
+
+        private static double GetUsageAngle(float usagePercent)
+        {
+            double clamped = ClampUsage(usagePercent);
+            return clamped >= 100.0 ? ArcFullCircleAngle : (clamped / 100.0) * 360.0;
         }
 
         private Brush GetUsageBrush(float usagePercent)
         {
-            if (usagePercent < 50)
+            float clamped = ClampUsage(usagePercent);
+
+            if (clamped < 50)
+            {
                 return Brushes.LimeGreen;
-            else if (usagePercent < 80)
+            }
+
+            if (clamped < 80)
+            {
                 return Brushes.Gold;
-            else
-                return Brushes.Red;
+            }
+
+            return Brushes.Red;
         }
 
         private void UpdateArcSegment(ArcSegment arc, double cx, double cy, double radius, double angle)
         {
-            double radians = (Math.PI / 180.0) * angle;
+            double safeAngle = Math.Max(0.0, Math.Min(ArcFullCircleAngle, angle));
+            double radians = (Math.PI / 180.0) * safeAngle;
             double endX = cx + radius * Math.Sin(radians);
             double endY = cy - radius * Math.Cos(radians);
 
             arc.Point = new Point(endX, endY);
-            arc.IsLargeArc = angle > 180.0;
+            arc.IsLargeArc = safeAngle > 180.0;
         }
 
-        // ================== Window Events ================== //
-
-        /// <summary>
-        /// On loaded, place window at bottom-right of the monitor where the mouse is located.
-        /// Also initialize the TaskbarIcon for the system tray.
-        /// </summary>
-        private void Window_Loaded(object sender, RoutedEventArgs e)
+        private void ApplyCircularWindowRegion()
         {
-            // 1) Win32: get mouse position
+            IntPtr hWnd = new WindowInteropHelper(this).Handle;
+            if (hWnd == IntPtr.Zero)
+            {
+                return;
+            }
+
+            double width = ActualWidth > 0 ? ActualWidth : Width;
+            double height = ActualHeight > 0 ? ActualHeight : Height;
+
+            PresentationSource source = PresentationSource.FromVisual(this);
+            if (source != null && source.CompositionTarget != null)
+            {
+                Matrix transform = source.CompositionTarget.TransformToDevice;
+                width *= transform.M11;
+                height *= transform.M22;
+            }
+
+            IntPtr region = CreateEllipticRgn(0, 0, Math.Max(1, (int)Math.Round(width)) + 1, Math.Max(1, (int)Math.Round(height)) + 1);
+            if (region == IntPtr.Zero)
+            {
+                return;
+            }
+
+            if (SetWindowRgn(hWnd, region, true) == 0)
+            {
+                DeleteObject(region);
+            }
+        }
+
+        private void PlaceWindowNearCursorMonitor()
+        {
             POINT mousePos;
             if (!GetCursorPos(out mousePos))
             {
@@ -165,117 +366,158 @@ namespace CircleMonitorWPF
                 mousePos.Y = 0;
             }
 
-            // 2) find which monitor the cursor is on
             IntPtr hMonitor = MonitorFromPoint(mousePos, MONITOR_DEFAULTTONEAREST);
-            if (hMonitor != IntPtr.Zero)
+            if (hMonitor == IntPtr.Zero)
             {
-                // 3) get the monitor's info (working area)
-                MONITORINFO mi = new MONITORINFO();
-                mi.cbSize = Marshal.SizeOf(mi);
-                if (GetMonitorInfo(hMonitor, ref mi))
-                {
-                    RECT work = mi.rcWork;
-                    // In 100% DPI scenario: direct approach
-                    this.Left = work.right - this.Width;
-                    this.Top = work.bottom - this.Height;
-                }
+                return;
             }
 
-            // Initialize tray icon
+            MONITORINFO mi = new MONITORINFO();
+            mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+            if (!GetMonitorInfo(hMonitor, ref mi))
+            {
+                return;
+            }
+
+            Point bottomRight = new Point(mi.rcWork.right, mi.rcWork.bottom);
+            PresentationSource source = PresentationSource.FromVisual(this);
+            if (source != null && source.CompositionTarget != null)
+            {
+                bottomRight = source.CompositionTarget.TransformFromDevice.Transform(bottomRight);
+            }
+
+            double width = ActualWidth > 0 ? ActualWidth : Width;
+            double height = ActualHeight > 0 ? ActualHeight : Height;
+            Left = bottomRight.X - width;
+            Top = bottomRight.Y - height;
+        }
+
+        private void EnsureTrayIcon()
+        {
+            if (_taskbarIcon != null)
+            {
+                return;
+            }
+
             _taskbarIcon = new TaskbarIcon();
-            // You can use your own icon file, or a System.Drawing.SystemIcons
-            // e.g. _taskbarIcon.Icon = new System.Drawing.Icon("MyIcon.ico");
             _taskbarIcon.Icon = System.Drawing.SystemIcons.Application;
             _taskbarIcon.ToolTipText = "CPU & RAM Monitor";
-            // The context menu is defined as resource "TrayMenu" in App.xaml
             _taskbarIcon.ContextMenu = (System.Windows.Controls.ContextMenu)FindResource("TrayMenu");
             _taskbarIcon.TrayMouseDoubleClick += TaskbarIcon_TrayMouseDoubleClick;
         }
 
-        /// <summary>
-        /// When user double-clicks on tray icon => restore the window
-        /// </summary>
+        private void Window_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (!_isInitialPlacementDone)
+            {
+                PlaceWindowNearCursorMonitor();
+                _isInitialPlacementDone = true;
+            }
+
+            ApplyCircularWindowRegion();
+            EnsureTrayIcon();
+            StartMonitoring();
+        }
+
+        private void Window_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            if (IsVisible)
+            {
+                StartMonitoring();
+            }
+            else
+            {
+                StopMonitoring();
+            }
+        }
+
         private void TaskbarIcon_TrayMouseDoubleClick(object sender, RoutedEventArgs e)
         {
             Show();
-            if (this.WindowState == WindowState.Minimized)
+            if (WindowState == WindowState.Minimized)
             {
-                this.WindowState = WindowState.Normal;
+                WindowState = WindowState.Normal;
             }
-            this.Activate();
+            Activate();
         }
 
-        /// <summary>
-        /// If the window is minimized, hide it (so that only tray icon remains)
-        /// </summary>
         private void Window_StateChanged(object sender, EventArgs e)
         {
-            if (this.WindowState == WindowState.Minimized)
+            if (WindowState == WindowState.Minimized)
             {
-                // hide from desktop
-                this.Hide();
+                Hide();
             }
         }
 
-        // Left-click drag
         private void Window_MouseDown(object sender, MouseButtonEventArgs e)
         {
             if (e.LeftButton == MouseButtonState.Pressed)
             {
-                this.DragMove();
+                DragMove();
             }
         }
 
-        // Mouse wheel => adjust opacity
         private void Window_MouseWheel(object sender, MouseWheelEventArgs e)
         {
-            double step = (e.Delta > 0) ? 0.05 : -0.05;
-            double newOpacity = this.Opacity + step;
-            if (newOpacity < 0.3) newOpacity = 0.3;
-            if (newOpacity > 1.0) newOpacity = 1.0;
-            this.Opacity = newOpacity;
-        }
+            double step = e.Delta > 0 ? 0.05 : -0.05;
+            double newOpacity = Math.Max(MinimumOpacity, Math.Min(MaximumOpacity, Opacity + step));
 
-        // Double-click => open Task Manager
-        private void Window_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-        {
-            if (e.LeftButton == MouseButtonState.Pressed)
+            if (Math.Abs(Opacity - newOpacity) > 0.001)
             {
-                try
-                {
-                    Process.Start("taskmgr");
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show("Failed to open Task Manager.\n" + ex.Message,
-                                    "Error",
-                                    MessageBoxButton.OK,
-                                    MessageBoxImage.Error);
-                }
+                Opacity = newOpacity;
             }
         }
 
-        // Right-click context menu => Minimize
+        private void Window_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed)
+            {
+                return;
+            }
+
+            try
+            {
+                Process.Start("taskmgr");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "Failed to open Task Manager.\n" + ex.Message,
+                    "Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+        }
+
         private void Minimize_Click(object sender, RoutedEventArgs e)
         {
-            this.WindowState = WindowState.Minimized;
+            WindowState = WindowState.Minimized;
         }
 
-        // Right-click context menu => Exit
         private void Exit_Click(object sender, RoutedEventArgs e)
         {
-            this.Close();
+            Close();
         }
 
-        // Clean up tray icon when window closes
         protected override void OnClosed(EventArgs e)
         {
-            base.OnClosed(e);
+            StopMonitoring();
+            IsVisibleChanged -= Window_IsVisibleChanged;
+
+            if (_timer != null)
+            {
+                _timer.Tick -= Timer_Tick;
+                _timer = null;
+            }
+
             if (_taskbarIcon != null)
             {
+                _taskbarIcon.TrayMouseDoubleClick -= TaskbarIcon_TrayMouseDoubleClick;
                 _taskbarIcon.Dispose();
                 _taskbarIcon = null;
             }
+
+            base.OnClosed(e);
         }
     }
 }

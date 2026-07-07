@@ -11,6 +11,7 @@ A lightweight **circular CPU & RAM monitor** built with WPF. This application cr
 - **Mouse hover** displays detailed RAM usage in MB
 - **Mouse wheel** changes window opacity
 - **Starts at the bottom-right corner** of the screen **where the mouse is** located
+- **Single-instance guard** prevents duplicate monitors from stacking resource usage
 
 ## Features
 
@@ -22,8 +23,9 @@ A lightweight **circular CPU & RAM monitor** built with WPF. This application cr
 
 2. **CPU & RAM usage**  
    
-   - Uses `PerformanceCounter` and `ManagementObjectSearcher` to retrieve CPU and memory info.  
-   - Updated every second via a `DispatcherTimer`.  
+   - Uses lightweight Win32 system APIs to retrieve CPU and memory info.
+   - Updated every second via a `DispatcherTimer` while the window is visible.
+   - Monitoring is paused while the window is hidden in the system tray.
    - RAM usage displayed in GB, with a tooltip showing MB details.
 
 3. **Color-coded arcs**  
@@ -44,8 +46,7 @@ A lightweight **circular CPU & RAM monitor** built with WPF. This application cr
 
 - **.NET 6+ (Windows)** or **.NET Framework 4.8** (Windows-only) with WPF support
 - **Hardcodet.Wpf.TaskbarNotification** (NuGet package)
-- **System.Management** (NuGet package) if using .NET 5+  
-- Windows OS that supports PerformanceCounter and WMI
+- Windows OS that supports `GetSystemTimes` and `GlobalMemoryStatusEx`
 
 ## How to Build and Run
 
