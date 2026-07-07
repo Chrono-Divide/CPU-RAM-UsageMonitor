@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -13,8 +12,8 @@ namespace CircleMonitorWPF
     public partial class MainWindow : Window
     {
         private const uint MONITOR_DEFAULTTONEAREST = 2;
-        private const double MinimumOpacity = 0.3;
-        private const double MaximumOpacity = 1.0;
+        private const double MinimumBackgroundOpacity = 0.3;
+        private const double MaximumBackgroundOpacity = 1.0;
         private const double ArcFullCircleAngle = 359.99;
 
         private DispatcherTimer _timer;
@@ -33,15 +32,6 @@ namespace CircleMonitorWPF
 
         [DllImport("user32.dll")]
         private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
-
-        [DllImport("gdi32.dll", SetLastError = true)]
-        private static extern IntPtr CreateEllipticRgn(int nLeftRect, int nTopRect, int nRightRect, int nBottomRect);
-
-        [DllImport("gdi32.dll", SetLastError = true)]
-        private static extern bool DeleteObject(IntPtr hObject);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -114,12 +104,6 @@ namespace CircleMonitorWPF
             _timer.Tick += Timer_Tick;
 
             IsVisibleChanged += Window_IsVisibleChanged;
-        }
-
-        protected override void OnSourceInitialized(EventArgs e)
-        {
-            base.OnSourceInitialized(e);
-            ApplyCircularWindowRegion();
         }
 
         private void Timer_Tick(object sender, EventArgs e)
@@ -326,37 +310,6 @@ namespace CircleMonitorWPF
             arc.IsLargeArc = safeAngle > 180.0;
         }
 
-        private void ApplyCircularWindowRegion()
-        {
-            IntPtr hWnd = new WindowInteropHelper(this).Handle;
-            if (hWnd == IntPtr.Zero)
-            {
-                return;
-            }
-
-            double width = ActualWidth > 0 ? ActualWidth : Width;
-            double height = ActualHeight > 0 ? ActualHeight : Height;
-
-            PresentationSource source = PresentationSource.FromVisual(this);
-            if (source != null && source.CompositionTarget != null)
-            {
-                Matrix transform = source.CompositionTarget.TransformToDevice;
-                width *= transform.M11;
-                height *= transform.M22;
-            }
-
-            IntPtr region = CreateEllipticRgn(0, 0, Math.Max(1, (int)Math.Round(width)) + 1, Math.Max(1, (int)Math.Round(height)) + 1);
-            if (region == IntPtr.Zero)
-            {
-                return;
-            }
-
-            if (SetWindowRgn(hWnd, region, true) == 0)
-            {
-                DeleteObject(region);
-            }
-        }
-
         private void PlaceWindowNearCursorMonitor()
         {
             POINT mousePos;
@@ -414,7 +367,6 @@ namespace CircleMonitorWPF
                 _isInitialPlacementDone = true;
             }
 
-            ApplyCircularWindowRegion();
             EnsureTrayIcon();
             StartMonitoring();
         }
@@ -460,12 +412,16 @@ namespace CircleMonitorWPF
         private void Window_MouseWheel(object sender, MouseWheelEventArgs e)
         {
             double step = e.Delta > 0 ? 0.05 : -0.05;
-            double newOpacity = Math.Max(MinimumOpacity, Math.Min(MaximumOpacity, Opacity + step));
+            double newOpacity = Math.Max(
+                MinimumBackgroundOpacity,
+                Math.Min(MaximumBackgroundOpacity, BackgroundCircle.Opacity + step));
 
-            if (Math.Abs(Opacity - newOpacity) > 0.001)
+            if (Math.Abs(BackgroundCircle.Opacity - newOpacity) > 0.001)
             {
-                Opacity = newOpacity;
+                BackgroundCircle.Opacity = newOpacity;
             }
+
+            e.Handled = true;
         }
 
         private void Window_MouseDoubleClick(object sender, MouseButtonEventArgs e)

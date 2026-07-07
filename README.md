@@ -9,7 +9,7 @@ A lightweight **circular CPU & RAM monitor** built with WPF. This application cr
 - **Double-click** the circle to open Task Manager
 - **Right-click** context menu for minimize and exit
 - **Mouse hover** displays detailed RAM usage in MB
-- **Mouse wheel** changes window opacity
+- **Mouse wheel** changes background opacity without dimming text or rings
 - **Starts at the bottom-right corner** of the screen **where the mouse is** located
 - **Single-instance guard** prevents duplicate monitors from stacking resource usage
 
@@ -19,7 +19,7 @@ A lightweight **circular CPU & RAM monitor** built with WPF. This application cr
    
    - Draggable by left-click dragging.  
    - Automatically placed at the bottom-right of the monitor under the mouse cursor.  
-   - Opacity adjustable via mouse wheel (range 0.3 ~ 1.0).
+   - Background opacity adjustable via mouse wheel (range 0.3 ~ 1.0).
 
 2. **CPU & RAM usage**  
    

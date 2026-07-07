@@ -4,12 +4,14 @@
         xmlns:tb="http://www.hardcodet.net/taskbar"
         Title="CircleMonitor"
         WindowStyle="None"
-        AllowsTransparency="False"
-        Background="Black"
+        AllowsTransparency="True"
+        Background="Transparent"
         Width="150" Height="150"
         ShowInTaskbar="False"
         ResizeMode="NoResize"
         Topmost="True"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True"
         MouseDown="Window_MouseDown"
         MouseWheel="Window_MouseWheel"
         MouseDoubleClick="Window_MouseDoubleClick"
@@ -25,8 +27,17 @@
     </Window.ContextMenu>
 
     <Grid x:Name="MainGrid">
+        <!-- Clip to a circle: center(75,75), radius=75 -->
+        <Grid.Clip>
+            <EllipseGeometry Center="75,75" RadiusX="75" RadiusY="75"/>
+        </Grid.Clip>
+
         <!-- Black background circle (150 x 150) -->
-        <Ellipse Width="150" Height="150" Fill="Black"/>
+        <Ellipse x:Name="BackgroundCircle"
+                 Width="150"
+                 Height="150"
+                 Fill="Black"
+                 Opacity="1"/>
 
         <!-- Outer arc (CPU): radius=70, thickness=8 -->
         <Path x:Name="OuterArcPath"
